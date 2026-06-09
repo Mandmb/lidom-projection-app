@@ -1,9 +1,18 @@
-# LIDOM Hitter Projection Grader - Version 2
+# League Projection Hitter Grader - Version 3
 
-This version is built for a hitter summary CSV that already includes the important columns.
+Adds a league dropdown so the model changes depending on the selected league.
 
-## Expected columns
+Included models:
+- LIDOM
+- PR League
+- MLB
+- MiLB / AAA
+- NPB
+- KBO
+- Mexican League
+- Custom
 
+Expected columns:
 - playerFullName
 - ForwVel
 - ExitVel
@@ -13,30 +22,8 @@ This version is built for a hitter summary CSV that already includes the importa
 - Hard Hit%
 - Pull%
 
-The app will auto-map those names when it sees them.
-
-## Install
-
+Run:
 ```bash
 pip install -r requirements.txt
-```
-
-## Run
-
-```bash
 streamlit run app.py
 ```
-
-## What changed in Version 2
-
-Removed raw pitch-level mapping fields:
-- Pitch Velocity
-- PitchCall
-- Play Result / Result
-- Pitch Type
-
-Added direct metric fields:
-- OPS vs FB95
-- Contact
-- Hard Hit
-- Pull

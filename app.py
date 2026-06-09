@@ -3,122 +3,143 @@ import pandas as pd
 import numpy as np
 from io import BytesIO
 
-st.set_page_config(page_title="LIDOM Hitter Projection Grader", layout="wide")
+st.set_page_config(page_title="League Projection Hitter Grader", layout="wide")
+st.title("League Projection Hitter Grader")
+st.caption("Upload a hitter CSV, select a league, and grade players based on how their profile may translate.")
 
-st.title("LIDOM Hitter Projection Grader")
-st.caption("Upload a hitter CSV and grade players based on traits that may translate to LIDOM performance.")
+LEAGUE_PROFILES = {
+    "LIDOM": {
+        "description": "High-stuff winter league. Rewards contact vs velocity, hard contact, and fastball performance.",
+        "weights": {"Forward Velocity":15,"Exit Velocity":20,"Launch Angle":12,"Hard Hit":17,"Contact":18,"Pull":8,"OPS vs FB95":10},
+        "ideal_la": (8.0, 24.0)
+    },
+    "PR League": {
+        "description": "Winter league where bat-to-ball, game speed, and offensive efficiency matter heavily.",
+        "weights": {"Forward Velocity":16,"Exit Velocity":17,"Launch Angle":12,"Hard Hit":15,"Contact":22,"Pull":8,"OPS vs FB95":10},
+        "ideal_la": (7.0, 23.0)
+    },
+    "MLB": {
+        "description": "Highest pitching quality. Rewards damage, contact quality, and performance vs elite velocity.",
+        "weights": {"Forward Velocity":8,"Exit Velocity":24,"Launch Angle":14,"Hard Hit":20,"Contact":14,"Pull":7,"OPS vs FB95":13},
+        "ideal_la": (10.0, 28.0)
+    },
+    "MiLB / AAA": {
+        "description": "Upper-minors projection. Balanced model between tools, contact, and power translation.",
+        "weights": {"Forward Velocity":12,"Exit Velocity":21,"Launch Angle":14,"Hard Hit":18,"Contact":16,"Pull":8,"OPS vs FB95":11},
+        "ideal_la": (9.0, 27.0)
+    },
+    "NPB": {
+        "description": "Contact-oriented high-execution league. Rewards contact and usable line-drive power.",
+        "weights": {"Forward Velocity":11,"Exit Velocity":17,"Launch Angle":16,"Hard Hit":14,"Contact":26,"Pull":6,"OPS vs FB95":10},
+        "ideal_la": (8.0, 24.0)
+    },
+    "KBO": {
+        "description": "Rewards contact and hard contact with slightly more tolerance for pull power.",
+        "weights": {"Forward Velocity":11,"Exit Velocity":20,"Launch Angle":14,"Hard Hit":17,"Contact":19,"Pull":9,"OPS vs FB95":10},
+        "ideal_la": (9.0, 26.0)
+    },
+    "Mexican League": {
+        "description": "Run-scoring environment. Rewards power, pull damage, and hard contact.",
+        "weights": {"Forward Velocity":9,"Exit Velocity":23,"Launch Angle":15,"Hard Hit":19,"Contact":13,"Pull":11,"OPS vs FB95":10},
+        "ideal_la": (11.0, 29.0)
+    },
+    "Custom": {
+        "description": "Build your own scoring model.",
+        "weights": {"Forward Velocity":15,"Exit Velocity":20,"Launch Angle":15,"Hard Hit":15,"Contact":15,"Pull":10,"OPS vs FB95":10},
+        "ideal_la": (8.0, 28.0)
+    }
+}
 
-# ----------------------------
-# Helpers
-# ----------------------------
-def normalize_name(x):
-    return str(x).strip().lower().replace(" ", "").replace("_", "").replace("-", "").replace("/", "")
+def norm(x):
+    return str(x).strip().lower().replace(" ","").replace("_","").replace("-","").replace("/","")
 
 def find_col(columns, candidates):
-    normalized = {normalize_name(c): c for c in columns}
+    m = {norm(c): c for c in columns}
     for cand in candidates:
-        key = normalize_name(cand)
-        if key in normalized:
-            return normalized[key]
+        if norm(cand) in m:
+            return m[norm(cand)]
     return None
 
 def safe_numeric(series):
     if series is None:
         return np.nan
-    s = series.astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False)
+    s = series.astype(str).str.replace("%","",regex=False).str.replace(",","",regex=False)
     return pd.to_numeric(s, errors="coerce")
 
 def maybe_percent(series):
     s = safe_numeric(series)
-    # If values look like 0.65, keep them.
-    # If values look like 65, convert to 0.65.
     if s.dropna().empty:
         return s
-    if s.dropna().median() > 1.5:
-        return s / 100
-    return s
+    return s/100 if s.dropna().median() > 1.5 else s
 
-def percentile_score(series, higher_is_better=True):
+def percentile_score(series):
     s = pd.to_numeric(series, errors="coerce")
     if s.notna().sum() <= 1:
         return pd.Series(np.full(len(s), 50.0), index=s.index)
-    ranks = s.rank(pct=True, method="average") * 100
-    if not higher_is_better:
-        ranks = 100 - ranks
-    return ranks.fillna(50)
+    return (s.rank(pct=True, method="average") * 100).fillna(50)
 
-def launch_angle_quality(avg_la, low, high):
-    la = pd.to_numeric(avg_la, errors="coerce")
-    midpoint = (low + high) / 2
-    half_range = (high - low) / 2
-    if half_range <= 0:
-        half_range = 10
-    # 100 near the center of the ideal range, declines as LA moves away.
-    score = 100 - (abs(la - midpoint) / half_range * 50)
-    return score.clip(0, 100).fillna(50)
+def launch_angle_score(series, low, high):
+    la = pd.to_numeric(series, errors="coerce")
+    mid = (low + high) / 2
+    half = max((high - low) / 2, 1)
+    return (100 - (abs(la - mid) / half * 50)).clip(0, 100).fillna(50)
+
+def letter_grade(x):
+    if x >= 90: return "A+"
+    if x >= 85: return "A"
+    if x >= 80: return "A-"
+    if x >= 75: return "B+"
+    if x >= 70: return "B"
+    if x >= 65: return "B-"
+    if x >= 60: return "C+"
+    if x >= 55: return "C"
+    return "D"
+
+def player_type(row):
+    ev, contact, hh, pull, ops = row["Exit Velocity"], row["Contact"], row["Hard Hit"], row["Pull"], row["OPS vs FB95"]
+    if pd.notna(ev) and pd.notna(hh) and ev >= 92 and hh >= 0.40:
+        return "Impact Power + Contact" if pd.notna(contact) and contact >= 0.72 else "Power Profile"
+    if pd.notna(contact) and contact >= 0.75:
+        return "Contact / Bat-to-Ball"
+    if pd.notna(ops) and ops >= 0.850:
+        return "Velocity Performer"
+    if pd.notna(pull) and pull >= 0.45:
+        return "Pull Damage Profile"
+    return "Balanced / Needs Context"
 
 def export_excel(df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="LIDOM Grades")
-        workbook = writer.book
-        worksheet = writer.sheets["LIDOM Grades"]
-        header_fmt = workbook.add_format({"bold": True, "bg_color": "#D9EAD3", "border": 1})
-        percent_fmt = workbook.add_format({"num_format": "0.0%"})
-        number_fmt = workbook.add_format({"num_format": "0.0"})
-        grade_fmt = workbook.add_format({"bold": True, "num_format": "0.0"})
-        for col_num, value in enumerate(df.columns.values):
-            worksheet.write(0, col_num, value, header_fmt)
-            worksheet.set_column(col_num, col_num, max(12, min(28, len(str(value)) + 2)))
-        for i, col in enumerate(df.columns):
-            if "%" in col or "Rate" in col:
-                worksheet.set_column(i, i, 13, percent_fmt)
-            elif "Grade" in col and col != "Letter Grade":
-                worksheet.set_column(i, i, 16, grade_fmt)
-            elif col not in ["Player", "Letter Grade"]:
-                worksheet.set_column(i, i, 13, number_fmt)
+        df.to_excel(writer, index=False, sheet_name="Projection Grades")
     return output.getvalue()
 
-# ----------------------------
-# Sidebar
-# ----------------------------
+st.sidebar.header("League Projection")
+league = st.sidebar.selectbox("Select league", list(LEAGUE_PROFILES.keys()))
+profile = LEAGUE_PROFILES[league]
+st.sidebar.info(profile["description"])
+
 st.sidebar.header("Grade Weights")
-
-default_weights = {
-    "Forward Velocity": 15,
-    "Exit Velocity": 20,
-    "Launch Angle": 15,
-    "Hard Hit": 15,
-    "Contact": 15,
-    "Pull": 10,
-    "OPS vs FB95": 10,
-}
-
 weights = {}
-for metric, default in default_weights.items():
-    weights[metric] = st.sidebar.slider(metric, 0, 40, default)
-
-weight_sum = sum(weights.values())
-if weight_sum == 0:
-    st.sidebar.error("At least one weight must be above 0.")
-    st.stop()
+locked = league != "Custom"
+for k, v in profile["weights"].items():
+    weights[k] = st.sidebar.slider(k, 0, 40, v, disabled=locked)
+if locked:
+    st.sidebar.caption("Choose Custom to manually adjust weights.")
 
 st.sidebar.header("Launch Angle Settings")
-ideal_la_low = st.sidebar.number_input("Ideal LA lower bound", value=8.0)
-ideal_la_high = st.sidebar.number_input("Ideal LA upper bound", value=28.0)
+la_low_default, la_high_default = profile["ideal_la"]
+la_low = st.sidebar.number_input("Ideal LA lower bound", value=float(la_low_default), disabled=locked)
+la_high = st.sidebar.number_input("Ideal LA upper bound", value=float(la_high_default), disabled=locked)
 
 uploaded = st.file_uploader("Upload hitter CSV", type=["csv"])
-
 if uploaded is None:
     st.info("Upload your hitter CSV to begin.")
     st.markdown("""
-### Expected columns
-The app will try to auto-detect these, and you can manually correct them:
-
-- Player
-- Forward Velocity
-- Exit Velocity
-- Launch Angle
+Expected columns:
+- playerFullName
+- ForwVel
+- ExitVel
+- LaunchAng
 - OPS vs FB95
 - Contact%
 - Hard Hit%
@@ -128,213 +149,119 @@ The app will try to auto-detect these, and you can manually correct them:
 
 df = pd.read_csv(uploaded)
 df.columns = [str(c).strip() for c in df.columns]
-
-st.subheader("Column Mapping")
-
 cols = ["-- None --"] + list(df.columns)
 
 auto = {
-    "player": find_col(df.columns, ["playerFullName", "Player", "Batter", "Hitter", "Hitter Name", "Batter Name"]),
-    "forward_velocity": find_col(df.columns, ["ForwVel", "Forward Velocity", "ForwardVelocity", "FV"]),
-    "exit_velocity": find_col(df.columns, ["ExitVel", "Exit Velocity", "ExitVelocity", "EV", "Avg Exit Velocity"]),
-    "launch_angle": find_col(df.columns, ["LaunchAng", "Launch Angle", "LaunchAngle", "LA", "Avg Launch Angle"]),
-    "ops_fb95": find_col(df.columns, ["OPS vs FB95", "OPSvsFB95", "OPS vs 95+", "OPS vs FB 95", "OPS v FB95"]),
-    "contact": find_col(df.columns, ["Contact%", "Contact", "Contact Rate"]),
-    "hard_hit": find_col(df.columns, ["Hard Hit%", "HardHit%", "Hard Hit", "HardHit", "Hard Hit Rate"]),
-    "pull": find_col(df.columns, ["Pull%", "Pull", "Pull Rate"]),
+    "player": find_col(df.columns, ["playerFullName","Player","Batter","Hitter"]),
+    "fv": find_col(df.columns, ["ForwVel","Forward Velocity","ForwardVelocity","FV"]),
+    "ev": find_col(df.columns, ["ExitVel","Exit Velocity","ExitVelocity","EV"]),
+    "la": find_col(df.columns, ["LaunchAng","Launch Angle","LaunchAngle","LA"]),
+    "ops": find_col(df.columns, ["OPS vs FB95","OPSvsFB95","OPS vs 95+","OPS v FB95"]),
+    "contact": find_col(df.columns, ["Contact%","Contact","Contact Rate"]),
+    "hardhit": find_col(df.columns, ["Hard Hit%","HardHit%","Hard Hit","HardHit","Hard Hit Rate"]),
+    "pull": find_col(df.columns, ["Pull%","Pull","Pull Rate"]),
 }
 
 def select_col(label, key):
     default = auto.get(key)
     index = cols.index(default) if default in cols else 0
-    choice = st.selectbox(label, cols, index=index, key=key)
-    return None if choice == "-- None --" else choice
+    val = st.selectbox(label, cols, index=index, key=key)
+    return None if val == "-- None --" else val
 
+st.subheader("Column Mapping")
 c1, c2 = st.columns(2)
-
 with c1:
     player_col = select_col("Player column", "player")
-    fv_col = select_col("Forward Velocity column", "forward_velocity")
-    ev_col = select_col("Exit Velocity column", "exit_velocity")
-    la_col = select_col("Launch Angle column", "launch_angle")
-
+    fv_col = select_col("Forward Velocity column", "fv")
+    ev_col = select_col("Exit Velocity column", "ev")
+    la_col = select_col("Launch Angle column", "la")
 with c2:
-    ops_fb95_col = select_col("OPS vs FB95 column", "ops_fb95")
+    ops_col = select_col("OPS vs FB95 column", "ops")
     contact_col = select_col("Contact column", "contact")
-    hard_hit_col = select_col("Hard Hit column", "hard_hit")
+    hardhit_col = select_col("Hard Hit column", "hardhit")
     pull_col = select_col("Pull column", "pull")
 
 if not player_col:
     st.error("Please select a player column.")
     st.stop()
 
-required_for_grade = {
-    "Forward Velocity": fv_col,
-    "Exit Velocity": ev_col,
-    "Launch Angle": la_col,
-    "OPS vs FB95": ops_fb95_col,
-    "Contact": contact_col,
-    "Hard Hit": hard_hit_col,
-    "Pull": pull_col,
-}
-
-missing = [k for k, v in required_for_grade.items() if v is None]
+missing = []
+required = {"Forward Velocity":fv_col,"Exit Velocity":ev_col,"Launch Angle":la_col,"OPS vs FB95":ops_col,"Contact":contact_col,"Hard Hit":hardhit_col,"Pull":pull_col}
+for k, v in required.items():
+    if v is None:
+        missing.append(k)
 if missing:
     st.warning("Missing columns will be treated as neutral 50 scores: " + ", ".join(missing))
 
-# ----------------------------
-# Build player table
-# ----------------------------
 work = pd.DataFrame()
 work["Player"] = df[player_col].astype(str)
+work["Forward Velocity"] = safe_numeric(df[fv_col]) if fv_col else np.nan
+work["Exit Velocity"] = safe_numeric(df[ev_col]) if ev_col else np.nan
+work["Launch Angle"] = safe_numeric(df[la_col]) if la_col else np.nan
+work["OPS vs FB95"] = safe_numeric(df[ops_col]) if ops_col else np.nan
+work["Contact"] = maybe_percent(df[contact_col]) if contact_col else np.nan
+work["Hard Hit"] = maybe_percent(df[hardhit_col]) if hardhit_col else np.nan
+work["Pull"] = maybe_percent(df[pull_col]) if pull_col else np.nan
 
-if fv_col:
-    work["Forward Velocity"] = safe_numeric(df[fv_col])
-else:
-    work["Forward Velocity"] = np.nan
+summary = work.groupby("Player", dropna=False).mean(numeric_only=True).reset_index()
 
-if ev_col:
-    work["Exit Velocity"] = safe_numeric(df[ev_col])
-else:
-    work["Exit Velocity"] = np.nan
-
-if la_col:
-    work["Launch Angle"] = safe_numeric(df[la_col])
-else:
-    work["Launch Angle"] = np.nan
-
-if ops_fb95_col:
-    work["OPS vs FB95"] = safe_numeric(df[ops_fb95_col])
-else:
-    work["OPS vs FB95"] = np.nan
-
-if contact_col:
-    work["Contact"] = maybe_percent(df[contact_col])
-else:
-    work["Contact"] = np.nan
-
-if hard_hit_col:
-    work["Hard Hit"] = maybe_percent(df[hard_hit_col])
-else:
-    work["Hard Hit"] = np.nan
-
-if pull_col:
-    work["Pull"] = maybe_percent(df[pull_col])
-else:
-    work["Pull"] = np.nan
-
-# If player appears multiple times, average the available metrics.
-summary = work.groupby("Player", dropna=False).agg({
-    "Forward Velocity": "mean",
-    "Exit Velocity": "mean",
-    "Launch Angle": "mean",
-    "OPS vs FB95": "mean",
-    "Contact": "mean",
-    "Hard Hit": "mean",
-    "Pull": "mean",
-}).reset_index()
-
-# ----------------------------
-# Scores
-# ----------------------------
 scores = pd.DataFrame({"Player": summary["Player"]})
 scores["Forward Velocity Score"] = percentile_score(summary["Forward Velocity"])
 scores["Exit Velocity Score"] = percentile_score(summary["Exit Velocity"])
-scores["Launch Angle Score"] = launch_angle_quality(summary["Launch Angle"], ideal_la_low, ideal_la_high)
+scores["Launch Angle Score"] = launch_angle_score(summary["Launch Angle"], la_low, la_high)
 scores["Hard Hit Score"] = percentile_score(summary["Hard Hit"])
 scores["Contact Score"] = percentile_score(summary["Contact"])
 scores["Pull Score"] = percentile_score(summary["Pull"])
 scores["OPS vs FB95 Score"] = percentile_score(summary["OPS vs FB95"])
 
-for metric, col in {
-    "Forward Velocity": "Forward Velocity Score",
-    "Exit Velocity": "Exit Velocity Score",
-    "Launch Angle": "Launch Angle Score",
-    "Hard Hit": "Hard Hit Score",
-    "Contact": "Contact Score",
-    "Pull": "Pull Score",
-    "OPS vs FB95": "OPS vs FB95 Score",
-}.items():
-    if required_for_grade[metric] is None:
+score_map = {
+    "Forward Velocity":"Forward Velocity Score",
+    "Exit Velocity":"Exit Velocity Score",
+    "Launch Angle":"Launch Angle Score",
+    "Hard Hit":"Hard Hit Score",
+    "Contact":"Contact Score",
+    "Pull":"Pull Score",
+    "OPS vs FB95":"OPS vs FB95 Score",
+}
+for metric, col in score_map.items():
+    if required[metric] is None:
         scores[col] = 50.0
 
-final_score = pd.Series(0.0, index=summary.index)
-weight_map = {
-    "Forward Velocity": "Forward Velocity Score",
-    "Exit Velocity": "Exit Velocity Score",
-    "Launch Angle": "Launch Angle Score",
-    "Hard Hit": "Hard Hit Score",
-    "Contact": "Contact Score",
-    "Pull": "Pull Score",
-    "OPS vs FB95": "OPS vs FB95 Score",
-}
+total_weight = sum(weights.values())
+final = pd.Series(0.0, index=summary.index)
+for metric, score_col in score_map.items():
+    final += scores[score_col] * (weights[metric] / total_weight)
 
-for metric, score_col in weight_map.items():
-    final_score += scores[score_col] * (weights[metric] / weight_sum)
+summary["Projected League"] = league
+summary["Projection Grade"] = final.round(1)
+summary["Letter Grade"] = summary["Projection Grade"].apply(letter_grade)
+summary["Player Type"] = summary.apply(player_type, axis=1)
 
-summary["LIDOM Projection Grade"] = final_score.round(1)
+out = summary.merge(scores, on="Player", how="left").sort_values("Projection Grade", ascending=False)
 
-def letter_grade(x):
-    if pd.isna(x):
-        return ""
-    if x >= 90:
-        return "A+"
-    if x >= 85:
-        return "A"
-    if x >= 80:
-        return "A-"
-    if x >= 75:
-        return "B+"
-    if x >= 70:
-        return "B"
-    if x >= 65:
-        return "B-"
-    if x >= 60:
-        return "C+"
-    if x >= 55:
-        return "C"
-    return "D"
-
-summary["Letter Grade"] = summary["LIDOM Projection Grade"].apply(letter_grade)
-
-out = summary.merge(scores, on="Player", how="left")
-out = out.sort_values("LIDOM Projection Grade", ascending=False)
-
-# Format display copy
+st.subheader(f"{league} Projection Leaderboard")
 display = out.copy()
 for col in ["Contact", "Hard Hit", "Pull"]:
-    if col in display.columns:
-        display[col] = display[col].apply(lambda x: "" if pd.isna(x) else f"{x:.1%}")
-
-st.subheader("LIDOM Projection Leaderboard")
+    display[col] = display[col].apply(lambda x: "" if pd.isna(x) else f"{x:.1%}")
 st.dataframe(display, use_container_width=True, hide_index=True)
 
 top = out.head(10)
-if len(top) > 0:
-    st.subheader("Top 10")
-    chart_df = top[["Player", "LIDOM Projection Grade"]].set_index("Player")
-    st.bar_chart(chart_df)
+if len(top):
+    st.subheader(f"Top 10 Fits for {league}")
+    st.bar_chart(top[["Player", "Projection Grade"]].set_index("Player"))
 
-st.subheader("Model Notes")
-st.markdown("""
-- The grade is percentile-based inside the uploaded CSV.
-- Higher Forward Velocity, Exit Velocity, Hard Hit, Contact, Pull, and OPS vs FB95 improve the grade.
-- Launch Angle is scored by closeness to the ideal range selected in the sidebar.
+st.subheader("Selected League Model")
+st.dataframe(pd.DataFrame({"Metric": list(weights.keys()), "Weight": list(weights.values())}), hide_index=True, use_container_width=True)
+
+st.markdown(f"""
+### Model Notes
+- Current league: **{league}**
+- Launch Angle target range: **{la_low:.1f}° to {la_high:.1f}°**
+- Grades are percentile-based inside the uploaded CSV.
 - Missing columns are treated as neutral 50 scores.
 """)
 
 excel_data = export_excel(out)
-st.download_button(
-    label="Download Results as Excel",
-    data=excel_data,
-    file_name="lidom_projection_grades.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
-
-csv_data = out.to_csv(index=False).encode("utf-8")
-st.download_button(
-    label="Download Results as CSV",
-    data=csv_data,
-    file_name="lidom_projection_grades.csv",
-    mime="text/csv"
-)
+safe_league = league.lower().replace(" ", "_").replace("/", "_")
+st.download_button("Download Results as Excel", excel_data, file_name=f"{safe_league}_projection_grades.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+st.download_button("Download Results as CSV", out.to_csv(index=False).encode("utf-8"), file_name=f"{safe_league}_projection_grades.csv", mime="text/csv")
